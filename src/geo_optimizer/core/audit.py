@@ -690,6 +690,7 @@ def _build_audit_result(
             signals=effective_signals,
             ai_discovery=effective_ai_discovery,
             js_rendering=effective_js,
+            cdn_check=effective_cdn,
         )
 
     return result

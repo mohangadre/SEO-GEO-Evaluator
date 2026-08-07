@@ -5,6 +5,7 @@ from __future__ import annotations
 from geo_optimizer.core.audit_platform import audit_platform_citation
 from geo_optimizer.models.results import (
     AiDiscoveryResult,
+    CdnAiCrawlerResult,
     CitabilityResult,
     ContentResult,
     JsRenderingResult,
@@ -22,6 +23,11 @@ def _google_ai(result):
     return next(p for p in result.platforms if p.platform == "google_ai")
 
 
+def _claude(result):
+    """Extract the claude PlatformScore from a result."""
+    return next(p for p in result.platforms if p.platform == "claude")
+
+
 def _defaults(**overrides):
     """Build default audit sub-results with overrides."""
     return {
@@ -32,16 +38,18 @@ def _defaults(**overrides):
         "content": overrides.get("content", ContentResult()),
         "citability": overrides.get("citability", CitabilityResult()),
         "signals": overrides.get("signals", SignalsResult()),
+        "cdn_check": overrides.get("cdn_check", None),
     }
 
 
 class TestPlatformCitation:
-    def test_returns_three_platforms(self):
+    def test_returns_all_platforms(self):
         result = audit_platform_citation(**_defaults())
         assert result.checked is True
-        assert len(result.platforms) == 3
+        assert len(result.platforms) == 4
         names = [p.platform for p in result.platforms]
         assert "chatgpt" in names
+        assert "claude" in names
         assert "perplexity" in names
         assert "google_ai" in names
 
@@ -77,12 +85,40 @@ class TestPlatformCitation:
         google_without = next(p for p in r_without.platforms if p.platform == "google_ai")
         assert google_with.score > google_without.score
 
+    def test_claudebot_allowed_boosts_claude(self):
+        robots_with = RobotsResult(bots_allowed=["ClaudeBot"])
+        robots_without = RobotsResult(bots_allowed=[])
+        r_with = audit_platform_citation(**_defaults(robots=robots_with))
+        r_without = audit_platform_citation(**_defaults(robots=robots_without))
+        assert _claude(r_with).score > _claude(r_without).score
+
+    def test_cdn_blocking_claudebot_withholds_access_points(self):
+        robots = RobotsResult(bots_allowed=["ClaudeBot"])
+        cdn_open = CdnAiCrawlerResult(
+            checked=True,
+            bot_results=[{"bot": "ClaudeBot", "status": 200, "blocked": False, "challenge_detected": False}],
+        )
+        cdn_blocked = CdnAiCrawlerResult(
+            checked=True,
+            any_blocked=True,
+            cdn_detected="cloudflare",
+            bot_results=[{"bot": "ClaudeBot", "status": 403, "blocked": True, "challenge_detected": False}],
+        )
+        r_open = audit_platform_citation(**_defaults(robots=robots, cdn_check=cdn_open))
+        r_blocked = audit_platform_citation(**_defaults(robots=robots, cdn_check=cdn_blocked))
+        # CDN block should reduce the Claude score relative to an open CDN
+        assert _claude(r_blocked).score < _claude(r_open).score
+        # ...and surface an actionable CDN recommendation
+        recs = " ".join(_claude(r_blocked).recommendations).lower()
+        assert "claudebot" in recs
+        assert "cdn" in recs or "cloudflare" in recs
+
     def test_high_citability_boosts_all(self):
         high = CitabilityResult(total_score=80)
         low = CitabilityResult(total_score=10)
         r_high = audit_platform_citation(**_defaults(citability=high))
         r_low = audit_platform_citation(**_defaults(citability=low))
-        for platform in ["chatgpt", "perplexity", "google_ai"]:
+        for platform in ["chatgpt", "claude", "perplexity", "google_ai"]:
             s_high = next(p for p in r_high.platforms if p.platform == platform).score
             s_low = next(p for p in r_low.platforms if p.platform == platform).score
             assert s_high >= s_low

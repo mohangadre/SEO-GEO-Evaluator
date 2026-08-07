@@ -8,12 +8,14 @@ Platform preferences based on Superlines 2026 and OtterlyAI research:
 - ChatGPT: community presence, Wikipedia-style structure, news coverage
 - Perplexity: source diversity, citation density, freshness
 - Google AI: domain authority signals, schema markup, traditional SEO
+- Claude: bot/CDN reachability, clean structured factual content, entity clarity
 """
 
 from __future__ import annotations
 
 from geo_optimizer.models.results import (
     AiDiscoveryResult,
+    CdnAiCrawlerResult,
     CitabilityResult,
     ContentResult,
     JsRenderingResult,
@@ -37,6 +39,7 @@ def audit_platform_citation(
     signals: SignalsResult | None = None,
     ai_discovery: AiDiscoveryResult | None = None,
     js_rendering: JsRenderingResult | None = None,
+    cdn_check: CdnAiCrawlerResult | None = None,
 ) -> PlatformCitationResult:
     """Compute per-platform citation readiness scores.
 
@@ -46,6 +49,7 @@ def audit_platform_citation(
         checked=True,
         platforms=[
             _score_chatgpt(robots, llms, content, citability, schema),
+            _score_claude(robots, llms, content, citability, schema, signals, cdn_check),
             _score_perplexity(robots, llms, content, citability, signals),
             _score_google_ai(robots, schema, meta, content, citability, signals, js_rendering),
         ],
@@ -109,6 +113,93 @@ def _score_chatgpt(robots, llms, content, citability, schema) -> PlatformScore:
         strengths.append("Article schema present")
 
     return PlatformScore(platform="chatgpt", score=min(score, 100), strengths=strengths, recommendations=recs)
+
+
+def _score_claude(robots, llms, content, citability, schema, signals=None, cdn_check=None) -> PlatformScore:
+    """Claude (Anthropic) favors: reachable bots, clean structured factual content, entity clarity.
+
+    Anthropic uses several user-agents (ClaudeBot for crawling, anthropic-ai for
+    training, Claude-SearchBot/Claude-User for answer citations). Claude values
+    well-structured, factual, quotable prose and clear entity signals.
+
+    Bot access is scored on *real-world reachability*: even if robots.txt allows
+    ClaudeBot, a CDN/WAF returning 403 (or a challenge) means Claude cannot
+    actually crawl the page, so the access points are withheld and a fix is
+    recommended.
+    """
+    score = 0
+    strengths: list[str] = []
+    recs: list[str] = []
+
+    # Real-world CDN/WAF reachability for ClaudeBot (overrides robots.txt intent)
+    claudebot_cdn_blocked = False
+    if cdn_check is not None and getattr(cdn_check, "checked", False):
+        for bot in cdn_check.bot_results:
+            if bot.get("bot") == "ClaudeBot" and (bot.get("blocked") or bot.get("challenge_detected")):
+                claudebot_cdn_blocked = True
+                break
+
+    # ClaudeBot access (primary crawler)
+    claudebot_allowed = any(b == "ClaudeBot" for b in robots.bots_allowed)
+    if claudebot_cdn_blocked:
+        # robots.txt may allow it, but the CDN/WAF is actually blocking it
+        cdn_name = (getattr(cdn_check, "cdn_detected", "") or "CDN/WAF").upper()
+        recs.append(f"{cdn_name} blocks ClaudeBot (HTTP 403/challenge) — allow the ClaudeBot user-agent at the CDN/WAF")
+    elif claudebot_allowed:
+        score += 15
+        strengths.append("ClaudeBot allowed and reachable")
+    else:
+        recs.append("Allow ClaudeBot in robots.txt")
+
+    # Answer/citation user-agents (Claude-SearchBot, Claude-User, anthropic-ai)
+    if any(b in ("Claude-SearchBot", "Claude-User", "claude-web", "anthropic-ai") for b in robots.bots_allowed):
+        score += 10
+        strengths.append("Claude citation/search agents allowed")
+    else:
+        recs.append("Allow Claude-SearchBot and anthropic-ai in robots.txt")
+
+    # llms.txt (LLM-friendly summary)
+    if llms.found:
+        score += 15
+        strengths.append("llms.txt present")
+    else:
+        recs.append("Add /llms.txt for LLM-friendly site summary")
+
+    # Citability — Claude prefers clean, quotable, factual prose
+    if citability.total_score >= 70:
+        score += 20
+        strengths.append(f"High citability ({citability.total_score}/100)")
+    elif citability.total_score >= 50:
+        score += 12
+    elif citability.total_score >= 40:
+        score += 8
+
+    # Content structure and depth
+    if content.has_h1 and content.word_count >= 300:
+        score += 10
+        strengths.append("Well-structured content")
+    else:
+        recs.append("Add a clear H1 and at least 300 words of substantive content")
+
+    # Entity clarity via schema (Organization / Article)
+    if schema.has_organization:
+        score += 10
+        strengths.append("Organization schema present")
+    else:
+        recs.append("Add Organization schema for entity clarity")
+
+    if schema.has_article:
+        score += 10
+        strengths.append("Article schema present")
+
+    # Freshness signals
+    if signals and signals.has_freshness:
+        score += 10
+        strengths.append("Content freshness signals present")
+    else:
+        recs.append("Add dateModified schema or freshness indicators")
+
+    return PlatformScore(platform="claude", score=min(score, 100), strengths=strengths, recommendations=recs)
 
 
 def _score_perplexity(robots, llms, content, citability, signals) -> PlatformScore:
